@@ -1,8 +1,11 @@
+#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <math.h>
 #include <sys/time.h>
+
+#define CHUNKSIZE 1
 
 typedef enum {
     COL_IDX,
@@ -203,6 +206,7 @@ void chol(sm *mat, sm *mat_col)
             return ;
         }
         mat->x[p] = sqrt(x);
+        #pragma omp parallel for schedule(dynamic, CHUNKSIZE)
         for (j=mat_col->ptr[i]; j<mat_col->ptr[i+1]; ++j) {
 
             if (mat_col->ind[j] <= i) continue;
@@ -294,6 +298,7 @@ int main(int argc, char ** argv)
 
     gettimeofday(&t1, NULL);
     chol(matrix, matrix_col);
+    debug_matrix(matrix);
     gettimeofday(&t2, NULL);
     printf("SOLVE time: ");
     print_time(&t1, &t2);
