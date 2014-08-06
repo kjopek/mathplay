@@ -206,7 +206,7 @@ void chol(sm *mat, sm *mat_col)
             return ;
         }
         mat->x[p] = sqrt(x);
-        #pragma omp parallel for schedule(dynamic, CHUNKSIZE)
+        //#pragma omp parallel for schedule(dynamic, CHUNKSIZE)
         for (j=mat_col->ptr[i]; j<mat_col->ptr[i+1]; ++j) {
 
             if (mat_col->ind[j] <= i) continue;
@@ -298,16 +298,16 @@ int main(int argc, char ** argv)
 
     gettimeofday(&t1, NULL);
     chol(matrix, matrix_col);
-    debug_matrix(matrix);
+    //debug_matrix(matrix);
     gettimeofday(&t2, NULL);
     printf("SOLVE time: ");
     print_time(&t1, &t2);
 
-    /*for (i=0; i<matrix->n; ++i) {
+    for (i=0; i<matrix->n; ++i) {
         for (j=matrix->ptr[i]; j<matrix->ptr[i+1]; ++j) {
             printf("%d %d %e\n", i, matrix->ind[j], matrix->x[j]);
         }
-    } */
+    }
 
     free_matrix(matrix);
     free_matrix(matrix_col);
