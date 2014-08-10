@@ -5,7 +5,7 @@
 #include <math.h>
 #include <sys/time.h>
 
-#define CHUNKSIZE 1
+#define CHUNKSIZE 5
 
 typedef enum {
     COL_IDX,
@@ -42,6 +42,8 @@ sm * alloc_matrix(int nz, int n, idx indexing)
     mat->ind = (unsigned int *) calloc(nz, sizeof(mat->ind));
     mat->n = n;
     mat->indexing = indexing;
+    mat->nz = nz;
+    
     if (!mat || !mat->x || !mat->ptr || !mat->ind) {
         free(mat);
         free(mat->x);
@@ -65,6 +67,9 @@ void fill_matrix(sm *matrix, in_data ** input_data, int nz)
 {
     int n = 0;
     matrix->nz = nz;
+    
+    // we assume lower-triangular matrix on input!
+    
     if (matrix->indexing == COL_IDX) {
         for (n=0; n<nz; ++n) {
             matrix->x[n] = input_data[n]->val;
@@ -92,6 +97,38 @@ void fill_matrix(sm *matrix, in_data ** input_data, int nz)
         }
         matrix->ptr[input_data[nz-1]->col+1] = nz;
     }
+}
+
+int *elim_tree (const sm *A)
+{
+    int i, k, p, inext, *w, *parent, *ancestor, *prev ;
+    unsigned n, *Ap, *Ai;
+    n = A->n ; Ap = A->ptr ; Ai = A->ind ;
+    parent = (int *) calloc (n, sizeof (int)) ;
+    /* allocate result */
+    w = (int *) calloc(n, sizeof (int)) ;
+    ancestor = w ; prev = w + n ;
+
+    for (k = 0 ; k < n ; k++) {
+        parent [k] = -1 ;
+        /* node k has no parent yet */
+        ancestor [k] = -1 ;
+        /* nor does k have an ancestor */
+        for (p = Ap [k] ; p < Ap [k+1] ; p++) {
+            i = Ai [p] ;
+            for ( ; i != -1 && i < k ; i = inext) {
+                /* traverse from i to k */
+                inext = ancestor [i] ;
+                /* inext = ancestor of i */
+                ancestor [i] = k ;
+                /* path compression */
+                if (inext == -1) parent [i] = k ;
+                /* no anc., parent is k */
+            }
+        }
+    }
+    free(w);
+    return parent;
 }
 
 int bin_search(sm *mat, unsigned int r, unsigned int c)
@@ -127,10 +164,14 @@ void usage(char *progname)
 	printf("Usage: %s <data file>\n", progname);
 }
 
+double get_time(struct timeval *t1, struct timeval *t2)
+{
+    return (t2->tv_sec - t1->tv_sec) + (t2->tv_usec - t1->tv_usec)/1000000.0;
+}
+
 void print_time(struct timeval *t1, struct timeval *t2)
 {
-    printf("%lf [s]\n", (t2->tv_sec - t1->tv_sec) + 
-                        (t2->tv_usec - t1->tv_usec)/1000000.0);
+    printf("%lf [s]\n", get_time(t1, t2));
 }
 
 int indata_cmp_row(const void *p1, const void *p2)
@@ -180,54 +221,39 @@ void print_data(in_data ** data, int nz)
     }
 }
 
-
 void chol(sm *mat, sm *mat_col)
 {
-    int i, j, k;
-    int *s = calloc(mat->n+1, sizeof(int));
+    int i, j, k, ki;
+
     for (i=0; i<mat->n; ++i) {
 
         double x;
         double y;
-        int p = bin_search(mat, i, i);
+        // assuming we have lower-triangular matrix L we can do this:
+        int p = mat->ptr[i+1]-1;
         int q;
-        if (p<0) {
-            printf("Not found: %d %d\n", i, i);
-            return ;
-        }
-
+        
         x = mat->x[p];
-
-        for (j=mat->ptr[i]; j<mat->ptr[i+1] && mat->ind[j]<i; ++j) {
+        for (j=mat->ptr[i]; j<mat->ptr[i+1]-1; ++j) {
             x -= mat->x[j]*mat->x[j];
         }
-        if (x < 0.0) {
-            printf("Error!\n");
-            return ;
-        }
         mat->x[p] = sqrt(x);
-        #pragma omp parallel for private(q,y) schedule(dynamic, CHUNKSIZE)
-        for (j=mat_col->ptr[i]; j<mat_col->ptr[i+1]; ++j) {
 
-            if (mat_col->ind[j] <= i) continue;
+        #pragma omp parallel for private(p,q,y,k,ki) schedule(dynamic, CHUNKSIZE)
+        for (j=mat_col->ptr[i]+1; j<mat_col->ptr[i+1]; ++j) {
+            // current hotspot - Tim Davies has answer :)
             q = bin_search(mat, mat_col->ind[j], i);
 
-            if (q<0) {
-                printf("Not found: %d %d\n", mat_col->ind[j], i);
-                return ;
-            }
             y = mat->x[q];
-            for (k=mat->ptr[mat_col->ind[j]]; k<mat->ptr[mat_col->ind[j]+1] && mat->ind[k] < i; ++k) {
-                int aj;
-                int m = mat->ind[k];
-                aj = bin_search(mat, i, m);
-                if (aj < 0) {
-                    continue;
-                }
-
-                y -= mat->x[k] * mat->x[aj];
+            for (k=mat->ptr[mat_col->ind[j]], ki=mat->ptr[i]; 
+                 k<mat->ptr[mat_col->ind[j]+1] && mat->ind[k] < i; 
+                 ++k) {
+                // below we perform simple incrementation, maybe we should perform binary search?
+                while (mat->ind[ki] < mat->ind[k] && ki<mat->ptr[i+1]) ++ki;
+                if (mat->ind[ki] == mat->ind[k])
+                    y -= mat->x[k] * mat->x[ki] * (mat->ind[ki] == mat->ind[k]);
             }
-            mat->x[q] = y/sqrt(x);
+            mat->x[q] = y/mat->x[p];
         }
     }
 }
@@ -298,7 +324,6 @@ int main(int argc, char ** argv)
 
     gettimeofday(&t1, NULL);
     chol(matrix, matrix_col);
-    //debug_matrix(matrix);
     gettimeofday(&t2, NULL);
     printf("SOLVE time: ");
     print_time(&t1, &t2);
