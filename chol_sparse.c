@@ -239,7 +239,7 @@ void chol(sm *mat, sm *mat_col)
         }
         mat->x[p] = sqrt(x);
 
-        #pragma omp parallel for private(p,q,y,k,ki) schedule(dynamic, CHUNKSIZE)
+        #pragma omp parallel for private(q,y,k,ki) schedule(dynamic, CHUNKSIZE)
         for (j=mat_col->ptr[i]+1; j<mat_col->ptr[i+1]; ++j) {
             // current hotspot - Tim Davies has answer :)
             q = bin_search(mat, mat_col->ind[j], i);
