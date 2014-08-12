@@ -261,7 +261,7 @@ void chol(sm *mat, sm *mat_col)
 int main(int argc, char ** argv)
 {
     unsigned int nz = 0;
-    unsigned int m = 0, n = 0;
+    unsigned int n = 0;
     unsigned int i, j;
     double val;
 
@@ -282,16 +282,15 @@ int main(int argc, char ** argv)
   	    return 2;
     }
 
-	gettimeofday(&t1, NULL);
     while (fscanf(fp, "%u %u  %lg", &i, &j, &val) != EOF) {
         ++nz;
-        m = i > m ? i : m;
         n = j > n ? j : n;
+        n = i > n ? i : n;
     }
     fseek(fp, 0, SEEK_SET);
-    ++n; ++m;
-
-    printf("Mat stat: nz=%u m=%u n=%u\n", nz, m, n);
+    ++n;;
+    printf("Thr/proc #: %d / %d \n", omp_get_max_threads(), omp_get_num_procs());
+    printf("Mat stat: nz=%u n=%u\n", nz, n);
     matrix = alloc_matrix(nz, n, COL_IDX);
     matrix_col = alloc_matrix(nz, n, ROW_IDX);
 
@@ -316,11 +315,6 @@ int main(int argc, char ** argv)
     free(input_data[0]);
     free(input_data);
     fclose(fp);
-
-    gettimeofday(&t2, NULL);
-
-    printf("LOAD time: ");
-    print_time(&t1, &t2);
 
     gettimeofday(&t1, NULL);
     chol(matrix, matrix_col);
