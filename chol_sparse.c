@@ -1,11 +1,9 @@
-#include <omp.h>
+//#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <math.h>
 #include <sys/time.h>
-
-#define CHUNKSIZE 5
 
 typedef enum {
     COL_IDX,
@@ -19,13 +17,19 @@ typedef struct
   // not zero elements
   unsigned int nz;
   // PTR and IDX values
-  unsigned int *ptr;
-  unsigned int *ind;
+  int *ptr;
+  int *ind;
   // size of matrix
   unsigned int n;
   // Compressed Row Storage or Compressed Column Storage?
   idx indexing;
 } sm;
+
+typedef struct
+{
+    int *children;
+    int *flying_ptrs;
+} sm_util;
 
 typedef struct
 {
@@ -38,8 +42,8 @@ sm * alloc_matrix(int nz, int n, idx indexing)
 {
     sm *mat = (sm*) calloc(1, sizeof(sm));
     mat->x = (double*) calloc(nz, sizeof(double));
-    mat->ptr = (unsigned int *) calloc(n+1, sizeof(mat->ptr));
-    mat->ind = (unsigned int *) calloc(nz, sizeof(mat->ind));
+    mat->ptr = (int *) calloc(n+1, sizeof(mat->ptr));
+    mat->ind = (int *) calloc(nz, sizeof(mat->ind));
     mat->n = n;
     mat->indexing = indexing;
     mat->nz = nz;
@@ -99,36 +103,65 @@ void fill_matrix(sm *matrix, in_data ** input_data, int nz)
     }
 }
 
-int *elim_tree (const sm *A)
+sm_util *elim_tree (const sm *A)
 {
-    int i, k, p, inext, *w, *parent, *ancestor, *prev ;
+    sm_util *smutil = malloc(sizeof(sm_util));
+    int i, k, p, inext,  *children, *flying_ptrs, *ancestor, *prev, *w;
     unsigned n, *Ap, *Ai;
-    n = A->n ; Ap = A->ptr ; Ai = A->ind ;
-    parent = (int *) calloc (n, sizeof (int)) ;
+
+    children = smutil->children = (int *) calloc (n, sizeof (int)) ;
+    flying_ptrs = smutil->flying_ptrs = (int*) calloc(n, sizeof(int));
+
+
+    n = A->n;
+    Ap = A->ptr;
+    Ai = A->ind;
+
     /* allocate result */
     w = (int *) calloc(n, sizeof (int)) ;
-    ancestor = w ; prev = w + n ;
-
+    ancestor = w ;
+    prev = w + n ;
+/*
     for (k = 0 ; k < n ; k++) {
-        parent [k] = -1 ;
-        /* node k has no parent yet */
+        flying_ptrs[k] = Ap[k];
+        children [k] = -1 ;
         ancestor [k] = -1 ;
-        /* nor does k have an ancestor */
         for (p = Ap [k] ; p < Ap [k+1] ; p++) {
             i = Ai [p] ;
             for ( ; i != -1 && i < k ; i = inext) {
-                /* traverse from i to k */
                 inext = ancestor [i] ;
-                /* inext = ancestor of i */
                 ancestor [i] = k ;
-                /* path compression */
-                if (inext == -1) parent [i] = k ;
-                /* no anc., parent is k */
+                if (inext == -1) children [i] = k ;
+
             }
         }
     }
+*/
     free(w);
-    return parent;
+
+    n = A->n;
+    Ap = A->ptr;
+    Ai = A->ind;
+
+    children = smutil->children = (int *) calloc (n, sizeof (int)) ;
+    flying_ptrs = smutil->flying_ptrs = (int*) calloc(n, sizeof(int));
+
+    for (k=0; k<n; ++k) {
+        children[k] = -1;
+        flying_ptrs[k] = Ap[k];
+    }
+
+    for (k = 0 ; k < n ; ++k) {
+        if (Ap[k+1]-Ap[k] != 1) {
+            for (p = Ap[k+1]-2; p >= Ap [k]; --p) {
+                i = Ai [p] ;
+                if (children[i] == -1) {
+                    children[i] = k;
+                }
+            }
+        }
+    }
+    return smutil;
 }
 
 int bin_search(sm *mat, unsigned int r, unsigned int c)
@@ -234,28 +267,72 @@ void chol(sm *mat, sm *mat_col)
         int q;
         
         x = mat->x[p];
-        for (j=mat->ptr[i]; j<mat->ptr[i+1]-1; ++j) {
+        for (j=mat->ptr[i]; j<p; ++j) {
             x -= mat->x[j]*mat->x[j];
         }
         mat->x[p] = sqrt(x);
 
-        #pragma omp parallel for private(q,y,k,ki) schedule(dynamic, CHUNKSIZE)
+//        #pragma omp parallel for private(q,y,k,ki) schedule(dynamic, CHUNKSIZE)
         for (j=mat_col->ptr[i]+1; j<mat_col->ptr[i+1]; ++j) {
             // current hotspot - Tim Davies has answer :)
             q = bin_search(mat, mat_col->ind[j], i);
 
             y = mat->x[q];
-            for (k=mat->ptr[mat_col->ind[j]], ki=mat->ptr[i]; 
-                 k<mat->ptr[mat_col->ind[j]+1] && mat->ind[k] < i; 
+            for (k=mat->ptr[mat_col->ind[j]], ki=mat->ptr[i];
+                 k<mat->ptr[mat_col->ind[j]+1] && mat->ind[k] < i;
                  ++k) {
                 // below we perform simple incrementation, maybe we should perform binary search?
                 while (mat->ind[ki] < mat->ind[k] && ki<mat->ptr[i+1]) ++ki;
                 if (mat->ind[ki] == mat->ind[k])
-                    y -= mat->x[k] * mat->x[ki] * (mat->ind[ki] == mat->ind[k]);
+                    y -= mat->x[k] * mat->x[ki];
             }
             mat->x[q] = y/mat->x[p];
         }
     }
+}
+
+int chol_new(sm *mat, sm_util *util)
+{
+    int *children = util->children;
+    int *flying_ptrs = util->flying_ptrs;
+
+    for (int i=0; i<mat->n; ++i) {
+        int p = mat->ptr[i+1]-1;
+        double x = mat->x[p];
+        for (int j=mat->ptr[i]; j<p; ++j) {
+            // L_{i,i} = sqrt(L_{i,i} - sum_{j=0}^{i-1} L_{i,j})
+            x -= mat->x[j]*mat->x[j];
+        }
+        mat->x[p] = sqrt(x);
+
+        for (int j=children[i]; j!=-1; j=children[j]) {
+
+            while (mat->ind[flying_ptrs[j]] < i) {
+                ++(flying_ptrs[j]);
+            }
+
+            //int max_ki = bin_search(mat, j, i);
+            int max_ki = flying_ptrs[j];
+            if (mat->ind[max_ki] == i) {
+
+                int ki = mat->ptr[j];
+                double y = mat->x[max_ki];
+                int max_k = mat->ptr[i+1]-2;
+
+                for (int k=mat->ptr[i]; k < max_k; ++k) {
+                    while (ki < max_ki && mat->ind[ki] < mat->ind[k]) ++ki;
+
+                    if (mat->ind[ki] == mat->ind[k]) {
+                        y -= mat->x[ki] * mat->x[k];
+                    }
+
+                }
+                mat->x[max_ki] = y/mat->x[p];
+            }
+        }
+    }
+
+    return 0;
 }
 
 int main(int argc, char ** argv)
@@ -265,15 +342,21 @@ int main(int argc, char ** argv)
     unsigned int i, j;
     double val;
 
+    int old = 0;
+
     struct timeval t1, t2;
 
     in_data ** input_data;
     sm *matrix;
     sm *matrix_col;
 
-    if (argc != 2) {
+    if (argc < 2) {
         usage(argv[0]);
         return 1;
+    }
+
+    if (argc == 3) {
+        old = 1;
     }
 
     FILE *fp = fopen(argv[1], "r");
@@ -289,10 +372,11 @@ int main(int argc, char ** argv)
     }
     fseek(fp, 0, SEEK_SET);
     ++n;;
-    printf("Thr/proc #: %d / %d \n", omp_get_max_threads(), omp_get_num_procs());
+//    printf("Thr/proc #: %d / %d \n", omp_get_max_threads(), omp_get_num_procs());
     printf("Mat stat: nz=%u n=%u\n", nz, n);
     matrix = alloc_matrix(nz, n, COL_IDX);
-    matrix_col = alloc_matrix(nz, n, ROW_IDX);
+    if (old)
+        matrix_col = alloc_matrix(nz, n, ROW_IDX);
 
     input_data = (in_data**) calloc(nz, sizeof(in_data*));
     input_data[0] = (in_data*) calloc(nz, sizeof(in_data));
@@ -302,25 +386,57 @@ int main(int argc, char ** argv)
         input_data[n] = input_data[0]+n;
     }
 
+    if (old) {
     qsort((void*) input_data[0], nz, sizeof(in_data), indata_cmp_col);
-
     fill_matrix(matrix_col, input_data, nz);
-
+    }
     if (matrix->indexing == COL_IDX)
         qsort((void*) input_data[0], nz, sizeof(in_data), indata_cmp_row);
     else
         qsort((void*) input_data[0], nz, sizeof(in_data), indata_cmp_col);
+
     fill_matrix(matrix, input_data, nz);
 
     free(input_data[0]);
     free(input_data);
     fclose(fp);
 
-    gettimeofday(&t1, NULL);
-    chol(matrix, matrix_col);
-    gettimeofday(&t2, NULL);
-    printf("SOLVE time: ");
-    print_time(&t1, &t2);
+    //debug_matrix(matrix);
+
+    printf("Creating tree...\n");
+    sm_util *tree = elim_tree(matrix);
+    //tree->children[3]=5;
+//    printf("children = [");
+//    for (i=0; i<matrix->n; ++i) {
+//        printf("%d ", tree->children[i]);
+//    }
+//    printf("]\n");
+
+//    printf("flying_ptrs = [");
+//    for (i=0; i<matrix->n; ++i) {
+//        printf("%d ", tree->flying_ptrs[i]);
+//    }
+//    printf("]\n");
+
+
+    printf("Solving...\n");
+
+    if (!old) {
+        gettimeofday(&t1, NULL);
+        chol_new(matrix, tree);
+        gettimeofday(&t2, NULL);
+        printf("SOLVE time: ");
+        print_time(&t1, &t2);
+    }
+
+    if (old) {
+        gettimeofday(&t1, NULL);
+        chol(matrix, matrix_col);
+        gettimeofday(&t2, NULL);
+        printf("SOLVE time: ");
+        print_time(&t1, &t2);
+    }
+    //debug_matrix(matrix);
 
     //for (i=0; i<matrix->n; ++i) {
     //    for (j=matrix->ptr[i]; j<matrix->ptr[i+1]; ++j) {
@@ -329,6 +445,7 @@ int main(int argc, char ** argv)
     //}
 
     free_matrix(matrix);
+    if (old)
     free_matrix(matrix_col);
     return 0;
 
